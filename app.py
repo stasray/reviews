@@ -1,6 +1,8 @@
 import streamlit as st
 from services import generate_fake_reviews, run_analysis
 
+broken
+
 st.set_page_config(page_title="Анализ отзывов", layout="wide")
 st.title("Анализ отзывов (демо)")
 
