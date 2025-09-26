@@ -8,9 +8,22 @@ import pandas as pd
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
 import requests
 import os
 import re
+import json
+from sentence_transformers import SentenceTransformer
+
+# NOTE: Heuristic/AI/Embedding insights moved to insights.py to keep this file smaller.
+from insights import (
+    extract_insights_heuristic,
+    extract_insights_ai,
+    extract_key_insights,
+    _clean_insight_list,
+    clarify_insights,
+)
 
 from models import Review, Analysis
 
@@ -20,6 +33,421 @@ _HF_API_LOGS: list = []
 
 def get_hf_logs(limit: int = 10):
     return _HF_API_LOGS[:limit]
+
+
+def _hf_text2text(prompt: str, model: str, token: str, max_new_tokens: int = 512) -> str:
+    url = f"https://api-inference.huggingface.co/models/{model}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {"max_new_tokens": max_new_tokens, "temperature": 0.2}
+    }
+    # Retry with exponential backoff
+    backoffs = [1, 2, 4]
+    last_exc = None
+    for attempt, delay in enumerate([0] + backoffs):
+        if delay:
+            try:
+                import time as _time
+                _time.sleep(delay)
+            except Exception:
+                pass
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            status = response.status_code
+            try:
+                data = response.json()
+            except Exception:
+                data = {"non_json": response.text}
+            response.raise_for_status()
+            break
+        except Exception as e:
+            last_exc = e
+            log_entry = {
+                "url": url,
+                "status": locals().get("status", None),
+                "inputs_count": 1,
+                "error": str(e),
+                "response": locals().get("data", None),
+            }
+            _HF_API_LOGS.insert(0, log_entry)
+            if len(_HF_API_LOGS) > 50:
+                del _HF_API_LOGS[50:]
+            print("[HF DEBUG ERROR]", log_entry)
+            if attempt == len(backoffs):
+                raise
+    log_entry = {
+        "url": url,
+        "status": status,
+        "inputs_count": 1,
+        "response": data,
+    }
+    _HF_API_LOGS.insert(0, log_entry)
+    if len(_HF_API_LOGS) > 50:
+        del _HF_API_LOGS[50:]
+    print("[HF DEBUG]", log_entry)
+    # data usually: [{"generated_text": "..."}] or {"generated_text": "..."}
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
+        return str(data[0]["generated_text"]) or ""
+    if isinstance(data, dict) and "generated_text" in data:
+        return str(data["generated_text"]) or ""
+    # fallback
+    return json.dumps(data)
+
+
+def _parse_insights_from_text(text: str) -> Dict[str, List[str]]:
+    problems: List[str] = []
+    strengths: List[str] = []
+    # Try JSON first
+    try:
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            obj = json.loads(m.group(0))
+            p = obj.get("problems") or obj.get("issues") or []
+            s = obj.get("strengths") or obj.get("pros") or []
+            problems = [str(x).strip() for x in p if str(x).strip()]
+            strengths = [str(x).strip() for x in s if str(x).strip()]
+    except Exception:
+        problems = []
+        strengths = []
+    # If not parsed, try bullets
+    if not problems and not strengths:
+        # split by lines, detect sections
+        lines = [l.strip(" -*•\t") for l in text.splitlines()]
+        mode = None
+        for line in lines:
+            low = line.lower()
+            if any(k in low for k in ["problems", "issues", "недостат", "минус"]):
+                mode = "problems"
+                continue
+            if any(k in low for k in ["strengths", "pros", "достоин", "плюс"]):
+                mode = "strengths"
+                continue
+            if mode == "problems" and len(line) >= 3:
+                problems.append(line)
+            elif mode == "strengths" and len(line) >= 3:
+                strengths.append(line)
+    return {"problems": problems[:10], "strengths": strengths[:10]}
+
+
+def extract_insights_ai(reviews: List[Review], token: str, model: Optional[str] = None) -> Dict[str, List[str]]:
+    if not token:
+        return {"problems": [], "strengths": []}
+    model_name = model or "google/flan-t5-large"
+    # Prepare multilingual prompt
+    # Keep prompt reasonably small
+    snippets = []
+    total_chars = 0
+    for r in reviews:
+        t = (r.text or "").strip()
+        if not t:
+            continue
+        t = t.replace("\n", " ")
+        if len(t) > 400:
+            t = t[:400] + "…"
+        if total_chars + len(t) > 6000:
+            break
+        snippets.append(f"- {t}")
+        total_chars += len(t)
+    has_cyr = any("\u0400" <= ch <= "\u04FF" for ch in " ".join(snippets))
+    if has_cyr:
+        system = (
+            "Извлеки ключевые ПРОБЛЕМЫ и ДОСТОИНСТВА из отзывов ниже. "
+            "Сгруппируй по смыслу, избегай повторов, используй краткие пунктов списки. "
+            "Ответ верни в JSON с полями problems (список строк) и strengths (список строк)."
+        )
+        prompt = system + "\nОтзывы:\n" + "\n".join(snippets)
+    else:
+        system = (
+            "Extract the key PROBLEMS and STRENGTHS from the reviews below. "
+            "Group similar points, avoid duplicates, use concise bullet-like phrases. "
+            "Return JSON with fields problems (list of strings) and strengths (list of strings)."
+        )
+        prompt = system + "\nReviews:\n" + "\n".join(snippets)
+    try:
+        gen = _hf_text2text(prompt, model_name, token, max_new_tokens=384)
+        parsed = _parse_insights_from_text(gen)
+        # Post-process AI output to improve quality
+        cleaned = {
+            "problems": _clean_insight_list(parsed.get("problems", []), polarity="negative"),
+            "strengths": _clean_insight_list(parsed.get("strengths", []), polarity="positive"),
+        }
+        return cleaned
+    except Exception:
+        return {"problems": [], "strengths": []}
+
+
+def extract_insights_heuristic(reviews: List[Review]) -> Dict[str, List[str]]:
+    # Split corpora by sentiment
+    pos_texts = [r.text for r in reviews if (r.sentiment or "").startswith("pos")]
+    neg_texts = [r.text for r in reviews if (r.sentiment or "").startswith("neg")]
+    return {pos_texts: neg_texts}
+    # Basic stopwords (en+ru)
+
+stop = {"and", "the", "to", "of", "a", "in", "for", "is", "on", "it", "was", "with", "this", "that", "are", "be",
+        "as", "have", "but", "not", "or", "very", "i", "we", "you", "they", "them", "their", "our", "my", "your",
+        "me", "he", "she", "his", "her", "its", "at", "by", "from", "so", "if", "because", "also", "even", "still",
+        "all", "really", "just", "one", "get", "got", "would", "could", "should", "arrived", "item", "thing",
+        "stuff", "lot", "bit", "quite", "pretty", "и", "в", "на", "это", "как", "что", "не", "с", "за", "от",
+        "очень", "бы", "то", "по", "у", "из", "а", "но", "до", "при", "для", "же", "так", "он", "она", "они", "мы",
+        "вы", "мне", "нам", "вас", "их", "там", "тут", "ещё", "еще", "очень", "всего", "все", "реально", "просто",
+        "вот", "типа", "короче", "товар", "вещь", "предмет"}
+
+def top_phrases(texts: List[str], n: int = 8) -> List[str]:
+    if not texts:
+        return []
+    # Prefer multi-word keyphrases
+    vec = TfidfVectorizer(
+        max_features=8000,
+        ngram_range=(2, 3),
+        min_df=1,
+        analyzer="word",
+        token_pattern=r"(?u)\b\w\w+\b",
+    )
+    X = vec.fit_transform([(t or "").lower() for t in texts])
+    vocab = vec.get_feature_names_out()
+    scores = X.mean(axis=0).A1
+    pairs = [(vocab[i], scores[i]) for i in range(len(vocab))]
+    def ok(term: str) -> bool:
+        parts = term.split()
+        # Reject phrases that contain stopwords or single-letter tokens
+        if any(len(w) <= 2 or w.isdigit() or w in stop for w in parts):
+            return False
+        # Reject phrases made of the same word repeated
+        if len(set(parts)) == 1:
+            return False
+        # Prefer phrases that include at least one content-looking token
+        if not any(re.search(r"[a-zA-Zа-яА-Я]", w) for w in parts):
+            return False
+        return True
+    pairs = [(t, s) for (t, s) in pairs if ok(t)]
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    # Diversity-aware selection with simple MMR-like penalization by word overlap
+    result: List[str] = []
+    result_norm: List[str] = []
+    seen_keys: set = set()
+    for term, _ in pairs:
+        norm = _normalize_phrase(term)
+        if not norm:
+            continue
+        # Skip if looks too generic after normalization
+        generic = {"Really", "All", "Item", "Товар", "Просто", "Очень"}
+        if norm in generic:
+            continue
+        key = " ".join(sorted(set(norm.lower().split())))
+        if key in seen_keys:
+            continue
+        # Penalize high overlap with already selected phrases
+        words = set(norm.lower().split())
+        too_similar = False
+        for existing in result_norm:
+            w2 = set(existing.lower().split())
+            overlap = len(words & w2) / max(1, len(words | w2))
+            if overlap >= 0.6:
+                too_similar = True
+                break
+        if too_similar:
+            continue
+        seen_keys.add(key)
+        result.append(norm)
+        result_norm.append(norm)
+        if len(result) >= n:
+            break
+    return result
+
+def _normalize_phrase(phrase: str) -> str:
+    t = (phrase or "").strip().lower()
+    # English normalizations
+    t = re.sub(r"\b(arriv(e|ed|es|ing))\s+(late|delayed|with delay)\b", "late delivery", t)
+    t = re.sub(r"\b(delivery\s+(was\s+)?)?(late|delayed)\b", "late delivery", t)
+    t = re.sub(r"\b(damag(e|ed|es|ing))\s+(package|packaging|box|item|product)\b", "damaged packaging", t)
+    t = re.sub(r"\b(broken|cracked)\s+(item|product|screen|device)\b", "broken product", t)
+    t = re.sub(r"\b(bad|poor)\s+quality\b", "poor quality", t)
+    t = re.sub(r"\b(high|expensive)\s+price\b", "high price", t)
+    t = re.sub(r"\b(rude|unhelpful)\s+(support|customer service|service|courier|driver)\b", "poor service", t)
+    t = re.sub(r"\b(long|slow)\s+(response|reply|shipping|delivery)\b", "slow service", t)
+    t = re.sub(r"\b(missing|lost)\s+(parts|item|package|order)\b", "missing items", t)
+    # Russian normalizations
+    t = re.sub(r"\b(доставк[аи])\s+(опоздал[аи]|поздн[ао])\b", "опоздание доставки", t)
+    t = re.sub(r"\b(опоздал[аи])\s+доставк[аи]\b", "опоздание доставки", t)
+    t = re.sub(r"\b(порв[ао]н(ая|ы)|помят(ая|ы)|поврежд(ен|ена|ены))\s+(упаковк[аи]|коробк[аи])\b", "поврежденная упаковка", t)
+    t = re.sub(r"\b(сломан(а|о|ы)|трещин[аы])\b", "сломанный товар", t)
+    t = re.sub(r"\b(плох(ое|ой)|низкое)\s+качеств[оа]\b", "плохое качество", t)
+    t = re.sub(r"\b(высокая|завышенная|большая)\s+цен[аы]\b", "высокая цена", t)
+    t = re.sub(r"\b(груб(ая|ый)|хамств(о|о)|невежлив(ая|ый))\s+(поддержк[аи]|курьер|сервис)\b", "плохой сервис", t)
+    t = re.sub(r"\b(долго|медленн[оая])\s+(отвечают|ответ|доставка|поддержка)\b", "медленный сервис", t)
+    t = re.sub(r"\b(нет|отсутствуют|пропал(и)?)\s+(детал(и|ей)|товар|части|комплектующ(ие|их))\b", "отсутствуют комплектующие", t)
+    # Cleanup duplicated spaces
+    t = re.sub(r"\s+", " ", t).strip()
+    # Capitalize first letter for display
+    if t:
+        t = t[0].upper() + t[1:]
+    return t
+    problems = top_phrases(neg_texts)
+    strengths = top_phrases(pos_texts)
+    return {"problems": problems, "strengths": strengths}
+
+
+def extract_key_insights(reviews: List[Review], max_items: int = 3) -> Dict[str, List[str]]:
+    """Cluster positive/negative reviews and label clusters with representative keyphrases.
+
+    Produces at most 2-3 concise, normalized multi-word insights for each polarity.
+    """
+    # Split by sentiment
+    pos_docs = [r.text for r in reviews if (r.sentiment or "").startswith("pos")]
+    neg_docs = [r.text for r in reviews if (r.sentiment or "").startswith("neg")]
+
+    # Early exits
+    if not pos_docs and not neg_docs:
+        return {"problems": [], "strengths": []}
+
+    # Prepare candidate phrases on full corpora to have a good pool
+    def build_candidates(texts: List[str]) -> List[str]:
+        if not texts:
+            return []
+        vec = TfidfVectorizer(
+            max_features=12000,
+            ngram_range=(2, 3),
+            min_df=2,
+            analyzer="word",
+            token_pattern=r"(?u)\b\w\w+\b",
+        )
+        try:
+            X = vec.fit_transform([(t or "").lower() for t in texts])
+        except ValueError:
+            return []
+        vocab = vec.get_feature_names_out()
+        scores = X.mean(axis=0).A1
+        pairs = sorted(zip(vocab, scores), key=lambda x: x[1], reverse=True)
+        cands: List[str] = []
+        seen: set = set()
+        for term, _ in pairs:
+            norm = _normalize_phrase(term)
+            if not norm or len(norm.split()) < 2:
+                continue
+            key = norm.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cands.append(norm)
+            if len(cands) >= 200:
+                break
+        return cands
+
+    pos_cands = build_candidates(pos_docs)
+    neg_cands = build_candidates(neg_docs)
+
+    # Load multilingual SBERT model once
+    try:
+        sbert = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    except Exception:
+        # Fallback to english-only minimal model if multilingual unavailable
+        sbert = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+    def cluster_and_label(texts: List[str], cands: List[str]) -> List[str]:
+        if not texts:
+            return []
+        docs = [t for t in texts if t and t.strip()]
+        if not docs:
+            return []
+        # Compute embeddings for docs
+        doc_emb = sbert.encode(docs, normalize_embeddings=True)
+        # Choose cluster count: 2 or 3 depending on size
+        k = 2 if len(docs) < 30 else 3
+        if len(docs) < 2:
+            k = 1
+        try:
+            km = KMeans(n_clusters=k, n_init=10, random_state=42)
+            labels = km.fit_predict(doc_emb)
+            centers = km.cluster_centers_
+        except Exception:
+            # If clustering fails, one cluster
+            labels = np.zeros(len(docs), dtype=int)
+            centers = np.mean(doc_emb, axis=0, keepdims=True)
+            k = 1
+
+        # Rank clusters by size
+        sizes = [int(np.sum(labels == i)) for i in range(k)]
+        order = np.argsort(sizes)[::-1]
+
+        # Precompute candidate embeddings
+        cand_list = cands[:200] if cands else []
+        if not cand_list:
+            # as a fallback, use normalized top phrases from texts via heuristic
+            return extract_insights_heuristic([Review(text=t) for t in texts])["problems"][:max_items]
+        cand_emb = sbert.encode(cand_list, normalize_embeddings=True)
+
+        selected: List[str] = []
+        seen: set = set()
+        for idx in order:
+            centroid = centers[idx:idx+1]
+            sims = cosine_similarity(centroid, cand_emb)[0]
+            ranked = np.argsort(sims)[::-1]
+            # pick the first candidate that is not too similar to already selected
+            for ridx in ranked[:30]:
+                cand = cand_list[ridx]
+                key = cand.lower()
+                if key in seen:
+                    continue
+                # diversity against selected
+                diverse = True
+                for ex in selected:
+                    w1 = set(cand.lower().split())
+                    w2 = set(ex.lower().split())
+                    if len(w1 & w2) / max(1, len(w1 | w2)) >= 0.6:
+                        diverse = False
+                        break
+                if not diverse:
+                    continue
+                seen.add(key)
+                selected.append(cand)
+                break
+            if len(selected) >= max_items:
+                break
+        return selected[:max_items]
+
+    problems = cluster_and_label(neg_docs, neg_cands)
+    strengths = cluster_and_label(pos_docs, pos_cands)
+
+    # Final cleanup and limit to 2-3 items
+    problems = _clean_insight_list(problems, polarity="negative")[:max_items]
+    strengths = _clean_insight_list(strengths, polarity="positive")[:max_items]
+    return {"problems": problems, "strengths": strengths}
+
+
+def _clean_insight_list(items: List[str], polarity: str) -> List[str]:
+    # Remove blanks, normalize, deduplicate, prefer multi-word phrases
+    cleaned: List[str] = []
+    seen: set = set()
+    for raw in items:
+        t = _strip_bullets(str(raw))
+        t = re.sub(r"[\"'`\-•*]+", " ", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        if not t:
+            continue
+        norm = t.lower()
+        # Drop obvious junk
+        junk = {"arrived", "really", "all", "item", "price", "poor", "bad"} if polarity == "negative" else {"good", "great", "nice", "price"}
+        if norm in junk:
+            continue
+        norm = _normalize_phrase(norm)
+        if not norm:
+            continue
+        # Require 2+ words after normalization
+        if len(norm.split()) < 2:
+            continue
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(norm)
+        if len(cleaned) >= 10:
+            break
+    return cleaned
+
+
+def _strip_bullets(text: str) -> str:
+    return (text or "").strip().lstrip("-•*\t ")
 
 
 def generate_fake_reviews(n: int = 5) -> List[Review]:
@@ -364,27 +792,39 @@ def _hf_sentiment_batch(texts: List[str], model: str, token: str) -> List[Tuple[
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     # HF supports sending list of inputs
-    try:
-        response = requests.post(url, headers=headers, json={"inputs": texts}, timeout=60)
-        status = response.status_code
+    backoffs = [1, 2, 4]
+    last_exc = None
+    for attempt, delay in enumerate([0] + backoffs):
+        if delay:
+            try:
+                import time as _time
+                _time.sleep(delay)
+            except Exception:
+                pass
         try:
-            data = response.json()
-        except Exception:
-            data = {"non_json": response.text}
-        response.raise_for_status()
-    except Exception as e:
-        log_entry = {
-            "url": url,
-            "status": locals().get("status", None),
-            "inputs_count": len(texts),
-            "error": str(e),
-            "response": locals().get("data", None),
-        }
-        _HF_API_LOGS.insert(0, log_entry)
-        if len(_HF_API_LOGS) > 50:
-            del _HF_API_LOGS[50:]
-        print("[HF DEBUG ERROR]", log_entry)
-        raise
+            response = requests.post(url, headers=headers, json={"inputs": texts}, timeout=60)
+            status = response.status_code
+            try:
+                data = response.json()
+            except Exception:
+                data = {"non_json": response.text}
+            response.raise_for_status()
+            break
+        except Exception as e:
+            last_exc = e
+            log_entry = {
+                "url": url,
+                "status": locals().get("status", None),
+                "inputs_count": len(texts),
+                "error": str(e),
+                "response": locals().get("data", None),
+            }
+            _HF_API_LOGS.insert(0, log_entry)
+            if len(_HF_API_LOGS) > 50:
+                del _HF_API_LOGS[50:]
+            print("[HF DEBUG ERROR]", log_entry)
+            if attempt == len(backoffs):
+                raise
     # store success log entry at the top
     log_entry = {
         "url": url,
@@ -561,10 +1001,29 @@ def run_analysis(
         sentiment_counts[normalized] += 1
         topic_distribution[r.topic or "Unknown"] = topic_distribution.get(r.topic or "Unknown", 0) + 1
 
+    # Insights (problems / strengths): prefer embedding-based clustering, then AI, then heuristic
+    insights = extract_key_insights(reviews, max_items=3)
+    # Clarify labels via rule-based and optional LLM rewrite
+    insights = clarify_insights(reviews, insights, hf_token if use_ai and hf_token else None)
+    if not insights["problems"] and not insights["strengths"] and use_ai and hf_token:
+        insights = extract_insights_ai(reviews, token=hf_token)
+        # Reduce to 3 and clean again
+        insights = {
+            "problems": _clean_insight_list(insights.get("problems", []), polarity="negative")[:3],
+            "strengths": _clean_insight_list(insights.get("strengths", []), polarity="positive")[:3],
+        }
+    if not insights["problems"] and not insights["strengths"]:
+        insights = extract_insights_heuristic(reviews)
+        insights = {
+            "problems": _clean_insight_list(insights.get("problems", []), polarity="negative")[:3],
+            "strengths": _clean_insight_list(insights.get("strengths", []), polarity="positive")[:3],
+        }
+
     stats = {
         "sentiment_counts": sentiment_counts,
         "topic_distribution": topic_distribution,
         "topics": topics_info,
+        "insights": insights,
     }
 
     return Analysis(

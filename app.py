@@ -132,6 +132,24 @@ if reviews:
         },
     )
 
+    st.subheader("Ключевые проблемы и достоинства (ИИ)")
+    insights = analysis.stats.get("insights", {"problems": [], "strengths": []})
+    col_p, col_s = st.columns(2)
+    with col_p:
+        st.markdown("**Проблемы**")
+        if insights.get("problems"):
+            for it in insights["problems"]:
+                st.markdown(f"- {it}")
+        else:
+            st.caption("Нет обнаруженных проблем")
+    with col_s:
+        st.markdown("**Достоинства**")
+        if insights.get("strengths"):
+            for it in insights["strengths"]:
+                st.markdown(f"- {it}")
+        else:
+            st.caption("Нет обнаруженных достоинств")
+
     # Heuristic notice if AI expected but scores look zero-ish
     if use_ai:
         any_nonzero = any(abs(getattr(r, "sentiment_score", 0.0)) > 1e-6 for r in analysis.reviews)
