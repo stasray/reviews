@@ -72,6 +72,12 @@ def test_load_reviews_from_file_csv_cp1251_with_russian_header(services_mod):
     assert "Отличное качество" in texts and "Доставка опоздала" in texts
 
 
+def test_load_reviews_from_file_unsupported_format_raises(services_mod):
+    data = b"some text content"
+    with pytest.raises(ValueError):
+        services_mod.load_reviews_from_file(data, "notes.txt")
+
+
 def test_extract_topics_basic(services_mod):
     texts = [
         "Delivery was late and the courier was rude",

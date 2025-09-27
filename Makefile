@@ -36,4 +36,4 @@ profile:
 
 .PHONY: web-perf
 web-perf:
-	$(PY) scripts/web_perf_test.py --scenario perf/scenario_example.json --rate 5 --concurrency 5 --duration 5
+	$(PY) scripts/web_perf_test.py --scenario perfomance/scenario_example.json --rate 5 --concurrency 5 --duration 5

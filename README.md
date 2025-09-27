@@ -61,7 +61,7 @@ make test-cov-html    # HTML‑отчет в .coverage_html/index.html
 
 Где находится:
 - Скрипт: `scripts/web_perf_test.py`
-- Сценарий: `perf/scenario_example.json`
+- Сценарий: `perfomance/scenario_example.json`
 
 Сценарий можно править: базовый URL, список шагов (метод, путь, заголовки, вес). Вес влияет на вероятность выбора шага.
 
@@ -78,7 +78,7 @@ python scripts/web_perf_test.py \
 
 # С использованием своего сценария JSON
 python scripts/web_perf_test.py \
-  --scenario perf/scenario_example.json \
+  --scenario perfomance/scenario_example.json \
   --rate 20 --concurrency 20 --duration 60
 ```
 
@@ -131,4 +131,3 @@ pytest -q tests/uitest/test_app_gui.py
 
 - Тесты и профилирование избегают сетевых вызовов и тяжелых моделей по умолчанию. Веб‑тест, естественно, делает HTTP‑запросы.
 - Если тесты запускаются в ограниченной среде (sandbox/CI), используйте цели Makefile — они уже настроены на корректный запуск.
-

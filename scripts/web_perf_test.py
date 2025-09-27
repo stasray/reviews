@@ -101,7 +101,7 @@ def summarize(results: List[Dict[str, Any]], duration: float) -> Dict[str, Any]:
 
 def main():
     parser = argparse.ArgumentParser(description="Simple web performance/load test")
-    parser.add_argument("--scenario", default="perf/scenario_example.json", help="Path to scenario JSON")
+    parser.add_argument("--scenario", default="perfomance/scenario_example.json", help="Path to scenario JSON")
     parser.add_argument("--base-url", default=None, help="Override base URL from scenario")
     parser.add_argument("--rate", type=float, default=10.0, help="Target request rate (RPS)")
     parser.add_argument("--concurrency", type=int, default=10, help="Max in-flight requests")
@@ -169,4 +169,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
