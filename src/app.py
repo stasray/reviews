@@ -2,9 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-from services import generate_fake_reviews, run_analysis, load_reviews_from_file
-from services import get_hf_logs
-from models import Review, Analysis
+from services import generate_fake_reviews, run_analysis, load_reviews_from_file, get_hf_logs
+from models import Review
 
 st.set_page_config(page_title="Анализ отзывов", layout="wide")
 st.title("Анализ отзывов")
