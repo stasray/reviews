@@ -13,7 +13,7 @@ ifneq (,$(wildcard .venv/bin/python))
   COVERAGE := .venv/bin/coverage
 endif
 
-.PHONY: test test-cov test-cov-html clean
+.PHONY: test test-cov test-cov-html profile clean
 
 test:
 	$(PYTEST) -q
@@ -29,4 +29,11 @@ test-cov-html:
 	@echo "HTML coverage: .coverage_html/index.html"
 
 clean:
-	rm -rf .pytest_cache .coverage .coverage_html coverage.xml
+	rm -rf .pytest_cache .coverage .coverage_html coverage.xml profile_results.json
+
+profile:
+	$(PY) scripts/profile_analysis.py --sizes "50,200,500"
+
+.PHONY: web-perf
+web-perf:
+	$(PY) scripts/web_perf_test.py --scenario perf/scenario_example.json --rate 5 --concurrency 5 --duration 5
