@@ -1,0 +1,25 @@
+{
+  "results": [
+    {
+      "n_reviews": 50,
+      "time_sec": 0.0351,
+      "reviews_per_sec": 1423.5,
+      "peak_mem_mb": 0.15,
+      "topics": 2
+    },
+    {
+      "n_reviews": 200,
+      "time_sec": 0.0177,
+      "reviews_per_sec": 11325.51,
+      "peak_mem_mb": 0.16,
+      "topics": 4
+    },
+    {
+      "n_reviews": 500,
+      "time_sec": 0.0344,
+      "reviews_per_sec": 14554.17,
+      "peak_mem_mb": 0.31,
+      "topics": 2
+    }
+  ]
+}
