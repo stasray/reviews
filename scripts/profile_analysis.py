@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 import argparse
 import json
-import os
 import sys
 import time
 import tracemalloc
@@ -12,7 +10,6 @@ def _ensure_import_path():
     root = Path(__file__).resolve().parents[1]
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    # Alias absolute imports used inside src.* to their package equivalents
     import importlib
     try:
         sys.modules.setdefault("models", importlib.import_module("src.models"))
@@ -56,10 +53,8 @@ def profile_run(sizes):
     _ensure_import_path()
     _stub_sentence_transformers()
 
-    # Import after stubbing
     from src import services as svc
 
-    # Lighten insights to avoid model use
     _lightweight_insights_patch(svc)
 
     results = []
