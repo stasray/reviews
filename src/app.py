@@ -2,8 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-from services import generate_fake_reviews, run_analysis, load_reviews_from_file, get_hf_logs
+from services import generate_fake_reviews, run_analysis
+from file_processing import load_reviews_from_file
+from sentiment_analysis import get_hf_logs
 from models import Review
+from export_utils import render_export_buttons
 
 st.set_page_config(page_title="Анализ отзывов", layout="wide")
 st.title("Анализ отзывов")
@@ -57,6 +60,9 @@ if reviews:
     if use_ai and not effective_use_ai:
         st.warning("ИИ-анализ не был запущен: укажите валидный HF API Token и модель.")
 
+    # Уведомление о времени выполнения
+    st.info("🔄 Запуск анализа... Процесс займет 1-2 минуты. Пожалуйста, подождите.")
+    
     analysis = run_analysis(
         reviews,
         use_ai=effective_use_ai,
@@ -83,25 +89,7 @@ if reviews:
         .sort_values("count", ascending=False)
     )
     fig_sent = px.bar(sent_df, x="sentiment", y="count", color="sentiment", title="Распределение тональности")
-    st.plotly_chart(fig_sent, width="stretch")
-
-    st.subheader("Темы")
-    topics_df = (
-        pd.DataFrame(
-            [
-                {
-                    "topic_id": tid,
-                    "label": meta.get("label", f"Topic {tid}"),
-                    "keywords": ", ".join(meta.get("keywords", [])),
-                    "size": meta.get("size", 0),
-                }
-                for tid, meta in analysis.stats["topics"].items()
-            ]
-        )
-        .sort_values("size", ascending=False)
-    )
-    fig_topics = px.bar(topics_df, x="label", y="size", hover_data=["keywords"], title="Размер кластеров тем")
-    st.plotly_chart(fig_topics, width="stretch")
+    st.plotly_chart(fig_sent, config={"displayModeBar": True})
 
     st.subheader("Таблица отзывов")
     table_df = pd.DataFrame(
@@ -110,7 +98,6 @@ if reviews:
                 "text": (r.text or ""),
                 "sentiment": (r.sentiment or ""),
                 "score": (r.sentiment_score or 0.0),
-                "topic": (r.topic or ""),
                 "language": (r.language or ""),
             }
             for r in analysis.reviews
@@ -130,6 +117,9 @@ if reviews:
             "score": st.column_config.NumberColumn(label="score", format="%.3f"),
         },
     )
+
+    # Добавляем кнопки экспорта
+    render_export_buttons(analysis)
 
     st.subheader("Ключевые проблемы и достоинства (ИИ)")
     insights = analysis.stats.get("insights", {"problems": [], "strengths": []})

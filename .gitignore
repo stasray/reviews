@@ -1,5 +1,6 @@
 venv/
 node_modules/
+latex/
 coverage.xml
 .coverage
 profile_results.json
