@@ -1,8 +1,5 @@
-# Simple test runner for this repo
-
 SHELL := /bin/bash
 
-# Prefer virtualenv tools if present
 PY := python3
 PYTEST := pytest
 COVERAGE := coverage

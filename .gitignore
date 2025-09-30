@@ -42,6 +42,9 @@ htmlcov/
 .tox/
 .nox/
 .coverage
+
+src/__pycache__/
+=======
 .coverage.*
 .cache
 nosetests.xml
