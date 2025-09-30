@@ -276,16 +276,22 @@ def extract_key_insights(reviews: List[Review], max_items: int = 3) -> Dict[str,
     except Exception:
         sbert = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-    def cluster_and_label(texts: List[str], cands: List[str]) -> List[str]:
-        if not texts:
-            return []
-        docs = [t for t in texts if t and t.strip()]
-        if not docs:
-            return []
+    def _perform_clustering(docs: List[str], sbert: SentenceTransformer) -> tuple:
+        """
+        Выполняет кластеризацию документов.
+        
+        Args:
+            docs: Список документов
+            sbert: Модель для эмбеддингов
+            
+        Returns:
+            Кортеж (labels, centers, k)
+        """
         doc_emb = sbert.encode(docs, normalize_embeddings=True)
         k = 2 if len(docs) < 30 else 3
         if len(docs) < 2:
             k = 1
+        
         try:
             km = KMeans(n_clusters=k, n_init=10, random_state=42)
             labels = km.fit_predict(doc_emb)
@@ -294,41 +300,121 @@ def extract_key_insights(reviews: List[Review], max_items: int = 3) -> Dict[str,
             labels = np.zeros(len(docs), dtype=int)
             centers = np.mean(doc_emb, axis=0, keepdims=True)
             k = 1
+        
+        return labels, centers, k
 
-        sizes = [int(np.sum(labels == i)) for i in range(k)]
+    def _is_candidate_diverse(cand: str, selected: List[str]) -> bool:
+        """
+        Проверяет, является ли кандидат достаточно разнообразным.
+        
+        Args:
+            cand: Кандидат для проверки
+            selected: Уже выбранные кандидаты
+            
+        Returns:
+            True если кандидат разнообразен
+        """
+        for ex in selected:
+            w1 = set(cand.lower().split())
+            w2 = set(ex.lower().split())
+            if len(w1 & w2) / max(1, len(w1 | w2)) >= 0.6:
+                return False
+        return True
+
+    def _process_cluster_candidates(centroid: np.ndarray, cand_list: List[str], 
+                                  cand_emb: np.ndarray, selected: List[str], 
+                                  seen: set) -> Optional[str]:
+        """
+        Обрабатывает кандидатов для одного кластера.
+        
+        Args:
+            centroid: Центроид кластера
+            cand_list: Список кандидатов
+            cand_emb: Эмбеддинги кандидатов
+            selected: Уже выбранные кандидаты
+            seen: Множество уже обработанных ключей
+            
+        Returns:
+            Выбранный кандидат или None
+        """
+        sims = cosine_similarity(centroid, cand_emb)[0]
+        ranked = np.argsort(sims)[::-1]
+        
+        for ridx in ranked[:30]:
+            cand = cand_list[ridx]
+            key = cand.lower()
+            if key in seen:
+                continue
+            
+            if _is_candidate_diverse(cand, selected):
+                seen.add(key)
+                return cand
+        
+        return None
+
+    def _select_diverse_candidates(centers: np.ndarray, cand_list: List[str], 
+                                 cand_emb: np.ndarray, max_items: int) -> List[str]:
+        """
+        Выбирает разнообразных кандидатов на основе кластеров.
+        
+        Args:
+            centers: Центроиды кластеров
+            cand_list: Список кандидатов
+            cand_emb: Эмбеддинги кандидатов
+            max_items: Максимальное количество элементов
+            
+        Returns:
+            Список выбранных кандидатов
+        """
+        selected: List[str] = []
+        seen: set = set()
+        
+        # Сортируем кластеры по размеру
+        sizes = [int(np.sum(labels == i)) for i in range(len(centers))]
         order = np.argsort(sizes)[::-1]
+        
+        for idx in order:
+            centroid = centers[idx:idx+1]
+            cand = _process_cluster_candidates(centroid, cand_list, cand_emb, selected, seen)
+            
+            if cand:
+                selected.append(cand)
+            
+            if len(selected) >= max_items:
+                break
+        
+        return selected[:max_items]
 
+    def cluster_and_label(texts: List[str], cands: List[str]) -> List[str]:
+        """
+        Кластеризует тексты и выбирает репрезентативные кандидаты.
+        
+        Args:
+            texts: Список текстов для кластеризации
+            cands: Список кандидатов для выбора
+            
+        Returns:
+            Список выбранных кандидатов
+        """
+        if not texts:
+            return []
+        
+        docs = [t for t in texts if t and t.strip()]
+        if not docs:
+            return []
+        
+        # Выполняем кластеризацию
+        labels, centers, k = _perform_clustering(docs, sbert)
+        
+        # Подготавливаем кандидатов
         cand_list = cands[:200] if cands else []
         if not cand_list:
             return extract_insights_heuristic([Review(text=t) for t in texts])["problems"][:max_items]
+        
         cand_emb = sbert.encode(cand_list, normalize_embeddings=True)
-
-        selected: List[str] = []
-        seen: set = set()
-        for idx in order:
-            centroid = centers[idx:idx+1]
-            sims = cosine_similarity(centroid, cand_emb)[0]
-            ranked = np.argsort(sims)[::-1]
-            for ridx in ranked[:30]:
-                cand = cand_list[ridx]
-                key = cand.lower()
-                if key in seen:
-                    continue
-                diverse = True
-                for ex in selected:
-                    w1 = set(cand.lower().split())
-                    w2 = set(ex.lower().split())
-                    if len(w1 & w2) / max(1, len(w1 | w2)) >= 0.6:
-                        diverse = False
-                        break
-                if not diverse:
-                    continue
-                seen.add(key)
-                selected.append(cand)
-                break
-            if len(selected) >= max_items:
-                break
-        return selected[:max_items]
+        
+        # Выбираем разнообразных кандидатов
+        return _select_diverse_candidates(centers, cand_list, cand_emb, max_items)
 
     problems = cluster_and_label(neg_docs, neg_cands)
     strengths = cluster_and_label(pos_docs, pos_cands)
@@ -366,37 +452,66 @@ def _rule_based_clarify(phrase: str, target_lang: str) -> str:
     return p
 
 
-def clarify_insights(reviews: List[Review], insights: Dict[str, List[str]], hf_token: Optional[str] = None) -> Dict[str, List[str]]:
-    # Choose target language by majority of reviews
+def _determine_target_language(reviews: List[Review]) -> str:
+    """
+    Определяет целевой язык на основе большинства отзывов.
+    
+    Args:
+        reviews: Список отзывов
+        
+    Returns:
+        Код языка ('ru' или 'en')
+    """
     ru_count = sum(1 for r in reviews if (r.language or "") == "ru")
     en_count = sum(1 for r in reviews if (r.language or "") == "en")
-    target_lang = "ru" if ru_count >= en_count else "en"
+    return "ru" if ru_count >= en_count else "en"
 
-    def apply_rules(items: List[str]) -> List[str]:
-        out: List[str] = []
-        seen: set = set()
-        for it in items:
-            lab = _rule_based_clarify(it, target_lang)
-            lab = _normalize_phrase(lab)
-            lab = re.sub(r"\s+", " ", lab).strip()
-            if not lab:
-                continue
-            key = lab.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(lab)
-        return out
 
-    problems = apply_rules(insights.get("problems", []))
-    strengths = apply_rules(insights.get("strengths", []))
+def _apply_rule_based_clarification(items: List[str], target_lang: str) -> List[str]:
+    """
+    Применяет правила для уточнения инсайтов.
+    
+    Args:
+        items: Список инсайтов для уточнения
+        target_lang: Целевой язык
+        
+    Returns:
+        Уточненные инсайты
+    """
+    out: List[str] = []
+    seen: set = set()
+    
+    for it in items:
+        lab = _rule_based_clarify(it, target_lang)
+        lab = _normalize_phrase(lab)
+        lab = re.sub(r"\s+", " ", lab).strip()
+        if not lab:
+            continue
+        key = lab.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(lab)
+    
+    return out
 
-    if not hf_token:
-        return {"problems": problems, "strengths": strengths}
 
-    # If token provided, ask model to rewrite for clarity
+def _ai_clarify_insights(problems: List[str], strengths: List[str], target_lang: str, hf_token: str) -> Dict[str, List[str]]:
+    """
+    Уточняет инсайты с помощью AI модели.
+    
+    Args:
+        problems: Список проблем
+        strengths: Список достоинств
+        target_lang: Целевой язык
+        hf_token: API токен
+        
+    Returns:
+        Уточненные инсайты
+    """
     try:
         from services import _hf_text2text  # local import to avoid cycles
+        
         if target_lang == "ru":
             prompt = (
                 "Переформулируй пункты ниже в короткие, ясные формулировки (2–5 слов), "
@@ -408,16 +523,43 @@ def clarify_insights(reviews: List[Review], insights: Dict[str, List[str]], hf_t
                 "Rewrite the items below into short, clear labels (2–5 words), "
                 "no filler verbs, no incomplete phrases. Return JSON with fields problems and strengths.\n\n"
             )
+        
         items_block = json.dumps({"problems": problems, "strengths": strengths}, ensure_ascii=False)
         gen = _hf_text2text(prompt + items_block, model="google/flan-t5-large", token=hf_token, max_new_tokens=256)
         obj = json.loads(re.search(r"\{[\s\S]*\}", gen).group(0))
+        
         p2 = [str(x).strip() for x in obj.get("problems", []) if str(x).strip()]
         s2 = [str(x).strip() for x in obj.get("strengths", []) if str(x).strip()]
+        
         # final cleanup
         p2 = _clean_insight_list(p2, polarity="negative")[:3]
         s2 = _clean_insight_list(s2, polarity="positive")[:3]
+        
         return {"problems": p2 or problems, "strengths": s2 or strengths}
     except Exception:
         return {"problems": problems, "strengths": strengths}
+
+
+def clarify_insights(reviews: List[Review], insights: Dict[str, List[str]], hf_token: Optional[str] = None) -> Dict[str, List[str]]:
+    """
+    Уточняет инсайты с помощью правил и опционально AI.
+    
+    Args:
+        reviews: Список отзывов
+        insights: Исходные инсайты
+        hf_token: API токен для AI уточнения (опционально)
+        
+    Returns:
+        Уточненные инсайты
+    """
+    target_lang = _determine_target_language(reviews)
+    
+    problems = _apply_rule_based_clarification(insights.get("problems", []), target_lang)
+    strengths = _apply_rule_based_clarification(insights.get("strengths", []), target_lang)
+
+    if not hf_token:
+        return {"problems": problems, "strengths": strengths}
+
+    return _ai_clarify_insights(problems, strengths, target_lang, hf_token)
 
 
