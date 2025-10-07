@@ -1,8 +1,0 @@
-{
-  "base_url": "https://example.com",
-  "steps": [
-    {"name": "Home", "method": "GET", "path": "/", "weight": 4},
-    {"name": "IANA", "method": "GET", "path": "/domains/reserved", "weight": 1}
-  ]
-}
-

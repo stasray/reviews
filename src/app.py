@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -69,6 +73,10 @@ if reviews:
         hf_model=hf_model if effective_use_ai else None,
         hf_token=hf_token if effective_use_ai else None,
     )
+    
+    # Сохраняем результаты в session state
+    st.session_state['analysis'] = analysis
+    st.session_state['reviews'] = reviews
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -156,5 +164,97 @@ if reviews:
 
     with st.expander("Технические детали анализа"):
         st.json({"analysis_id": analysis.id, "created_at": str(analysis.created_at), "stats": analysis.stats})
+
+# Отображаем сохраненные результаты, если они есть
+elif 'analysis' in st.session_state and st.session_state['analysis'] is not None:
+    analysis = st.session_state['analysis']
+    reviews = st.session_state['reviews']
+    
+    st.success("📊 Результаты предыдущего анализа")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Позитивные", analysis.stats["sentiment_counts"].get("positive", 0))
+    with col2:
+        st.metric("Нейтральные", analysis.stats["sentiment_counts"].get("neutral", 0))
+    with col3:
+        st.metric("Негативные", analysis.stats["sentiment_counts"].get("negative", 0))
+
+    st.subheader("Тональность")
+    sent_df = (
+        pd.DataFrame(
+            [
+                {"sentiment": k, "count": v}
+                for k, v in analysis.stats["sentiment_counts"].items()
+            ]
+        )
+        .sort_values("count", ascending=False)
+    )
+    fig_sent = px.bar(sent_df, x="sentiment", y="count", color="sentiment", title="Распределение тональности")
+    st.plotly_chart(fig_sent, config={"displayModeBar": True})
+
+    st.subheader("Таблица отзывов")
+    table_df = pd.DataFrame(
+        [
+            {
+                "text": (r.text or ""),
+                "sentiment": (r.sentiment or ""),
+                "score": (r.sentiment_score or 0.0),
+                "language": (r.language or ""),
+            }
+            for r in analysis.reviews
+        ]
+    )
+    table_df = table_df.fillna("")
+    # Ensure score is shown as float with 3 decimals in the UI
+    try:
+        table_df["score"] = pd.to_numeric(table_df["score"], errors="coerce").fillna(0.0)
+    except Exception:
+        pass
+    st.dataframe(
+        table_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "score": st.column_config.NumberColumn(label="score", format="%.3f"),
+        },
+    )
+
+    # Добавляем кнопки экспорта
+    render_export_buttons(analysis)
+
+    st.subheader("Ключевые проблемы и достоинства (ИИ)")
+    insights = analysis.stats.get("insights", {"problems": [], "strengths": []})
+    col_p, col_s = st.columns(2)
+    with col_p:
+        st.markdown("**Проблемы**")
+        if insights.get("problems"):
+            for it in insights["problems"]:
+                st.markdown(f"- {it}")
+        else:
+            st.caption("Нет обнаруженных проблем")
+    with col_s:
+        st.markdown("**Достоинства**")
+        if insights.get("strengths"):
+            for it in insights["strengths"]:
+                st.markdown(f"- {it}")
+        else:
+            st.caption("Нет обнаруженных достоинств")
+
+    with st.expander("Логи запросов к HF API"):
+        logs = get_hf_logs(10)
+        if logs:
+            st.json(logs)
+        else:
+            st.caption("Пока нет логов. Запустите ИИ-анализ для появления записей.")
+
+    with st.expander("Технические детали анализа"):
+        st.json({"analysis_id": analysis.id, "created_at": str(analysis.created_at), "stats": analysis.stats})
+        
+    # Кнопка для очистки результатов
+    if st.button("🗑️ Очистить результаты", help="Удалить сохраненные результаты анализа"):
+        st.session_state['analysis'] = None
+        st.session_state['reviews'] = None
+        st.rerun()
 else:
     st.info("Загрузите файл или сгенерируйте тестовые данные в сайдбаре, затем запустите анализ.")

@@ -5,26 +5,26 @@
 обработки файлов и других функций анализа отзывов.
 """
 
-from sentiment_analysis import (
+from .sentiment_analysis import (
     detect_language,
     simple_sentiment_score,
     analyze_sentiment_ai,
     get_hf_logs
 )
 
-from topic_modeling import extract_topics
+from .topic_modeling import extract_topics
 
-from insights_extraction import (
+from .insights_extraction import (
     extract_insights_heuristic,
     extract_key_insights,
     clarify_insights
 )
 
-from file_processing import load_reviews_from_file
+from .file_processing import load_reviews_from_file
 
-from huggingface_client import extract_insights_ai
+from .huggingface_client import extract_insights_ai
 
-from text_utils import (
+from .text_utils import (
     _normalize_phrase,
     _strip_bullets,
     _clean_insight_list,
