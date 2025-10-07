@@ -9,14 +9,11 @@ import pytest
 
 @pytest.fixture(scope="session")
 def services_mod():
-    # Ensure heavy optional deps won't fail import
-    # 1) If sklearn is missing, skip all tests using services
     try:
         import sklearn  # noqa: F401
     except Exception:
         pytest.skip("scikit-learn not installed; skipping services-dependent tests")
 
-    # 2) Provide a lightweight stub for sentence_transformers if absent
     if "sentence_transformers" not in sys.modules:
         m = types.ModuleType("sentence_transformers")
 
@@ -32,12 +29,9 @@ def services_mod():
         m.SentenceTransformer = _DummyST
         sys.modules["sentence_transformers"] = m
 
-    # Ensure project root on path for `src` imports
     root = Path(__file__).resolve().parents[1]
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    # Some modules inside src use absolute imports like `from insights import ...`.
-    # Provide aliases so they resolve to the package versions under src/.
     sys.modules.setdefault("models", importlib.import_module("src.models"))
     sys.modules.setdefault("insights", importlib.import_module("src.insights"))
 

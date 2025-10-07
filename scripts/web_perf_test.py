@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 import concurrent.futures as cf
 import json
@@ -20,7 +19,6 @@ def load_scenario(path: Optional[str], base_url: Optional[str]) -> Dict[str, Any
         data = {"base_url": base_url or "https://example.com", "steps": [{"name": "Home", "method": "GET", "path": "/", "weight": 1}]}
     if base_url:
         data["base_url"] = base_url
-    # Normalize weights
     steps = data.get("steps", [])
     for s in steps:
         s.setdefault("weight", 1)
@@ -127,18 +125,13 @@ def main():
                 step = pick_step(steps)
                 return pool.submit(run_request, session, base_url, step, args.timeout)
 
-            # Prime some requests
             while time.perf_counter() < end and len(futures) < args.concurrency:
                 limiter.wait()
                 futures.append(submit_one())
 
-            # Main loop: pace submissions and collect completed
             while time.perf_counter() < end:
-                # Pacing
                 limiter.wait()
-                # Submit new
                 futures.append(submit_one())
-                # Drain any done futures quickly
                 still: List[cf.Future] = []
                 for fut in futures:
                     if fut.done():
@@ -152,7 +145,6 @@ def main():
                         still.append(fut)
                 futures = still
 
-            # After duration, wait for queued to finish
             for fut in cf.as_completed(futures, timeout=args.timeout + 5):
                 try:
                     res = fut.result()
